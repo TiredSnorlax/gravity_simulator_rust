@@ -1,7 +1,10 @@
 use std::f32::consts::PI;
 
 use bevy::{
-    math::vec2, prelude::*, render::camera::RenderTarget, sprite::MaterialMesh2dBundle,
+    input::mouse::{MouseMotion, MouseWheel},
+    prelude::*,
+    render::camera::RenderTarget,
+    sprite::MaterialMesh2dBundle,
     window::PresentMode,
 };
 use bevy_inspector_egui::WorldInspectorPlugin;
@@ -28,9 +31,7 @@ struct BodyPlaceholder {
 }
 
 #[derive(Component)]
-struct BodyVelIndicator {
-    size: f32,
-}
+struct BodyVelIndicator;
 
 impl BodyPlaceholder {
     fn get_velocity(&self, new_pos: Vec2) -> Vec2 {
@@ -73,6 +74,8 @@ fn main() {
         .add_system(body_movement)
         .add_system(cursor_actions)
         .add_system(keyboard_inputs)
+        .add_system(camera_zoom)
+        .add_system(camera_movement)
         .run();
 }
 
@@ -86,7 +89,7 @@ fn setup(
     commands.spawn((
         MaterialMesh2dBundle {
             mesh: meshes.add(shape::Circle::new(10.).into()).into(),
-            material: materials.add(ColorMaterial::from(Color::rgba(1.0, 1.0, 1.0, 0.2))),
+            material: materials.add(ColorMaterial::from(Color::rgba(1.0, 1.0, 1.0, 0.5))),
             transform: Transform::from_translation(Vec3::new(0., 0., 10.)),
             visibility: Visibility { is_visible: false },
             ..default()
@@ -102,9 +105,10 @@ fn setup(
             mesh: meshes.add(shape::RegularPolygon::new(10., 3).into()).into(),
             material: materials.add(ColorMaterial::from(Color::rgba(1.0, 1.0, 1.0, 0.8))),
             transform: Transform::from_translation(Vec3::new(0., 0., 10.)),
+            visibility: Visibility { is_visible: false },
             ..default()
         },
-        BodyVelIndicator { size: 10. },
+        BodyVelIndicator,
     ));
 
     spawn_random(commands, meshes, materials);
@@ -147,22 +151,23 @@ fn cursor_actions(
     // need to get window dimensions
     wnds: Res<Windows>,
     // query to get camera transform
-    q_camera: Query<(&Camera, &GlobalTransform), With<MainCamera>>,
     mut q_placeholder: Query<(&mut BodyPlaceholder, &mut Visibility, &mut Transform)>,
     mut q_vel_indicator: Query<(
         &mut BodyVelIndicator,
+        &mut Visibility,
         &mut Transform,
         Without<BodyPlaceholder>,
     )>,
+    q_camera: Query<(&Camera, &GlobalTransform), With<MainCamera>>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
     let (mut placeholder, mut placeholder_visibility, mut placeholder_transform) =
         q_placeholder.single_mut();
-    let (mut indicator, mut indicator_transform, _) = q_vel_indicator.single_mut();
+    let (_, mut indicator_visibility, mut indicator_transform, _) = q_vel_indicator.single_mut();
 
-    let (camera, _) = q_camera.single();
+    let (camera, camera_transform) = q_camera.single();
 
     // get the window that the camera is displaying to (or the primary window)
     let wnd = if let RenderTarget::Window(id) = camera.target {
@@ -171,22 +176,35 @@ fn cursor_actions(
         wnds.get_primary().unwrap()
     };
     if let Some(screen_pos) = wnd.cursor_position() {
-        let pos = screen_pos - vec2(WIDTH as f32 / 2.0, HEIGHT as f32 / 2.0);
+        let window_size = Vec2::new(wnd.width() as f32, wnd.height() as f32);
+
+        // convert screen position [0..resolution] to ndc [-1..1] (gpu coordinates)
+        let ndc = (screen_pos / window_size) * 2.0 - Vec2::ONE;
+
+        // matrix for undoing the projection and camera transform
+        let ndc_to_world = camera_transform.compute_matrix() * camera.projection_matrix().inverse();
+
+        // use it to convert ndc to world-space coordinates
+        let world_pos = ndc_to_world.project_point3(ndc.extend(-1.0));
+
+        // reduce it to a 2D value
+        let pos: Vec2 = world_pos.truncate();
         if buttons.just_pressed(MouseButton::Left) {
             placeholder.pos = pos;
 
             placeholder_transform.translation = Vec3 {
                 x: pos.x,
                 y: pos.y,
-                z: 0.,
+                z: 10.,
             };
             placeholder.can_place = true;
             placeholder_visibility.is_visible = true;
 
+            indicator_visibility.is_visible = true;
             indicator_transform.translation = Vec3 {
                 x: pos.x,
                 y: pos.y,
-                z: 0.,
+                z: 10.,
             };
         }
         if buttons.pressed(MouseButton::Left) {
@@ -247,6 +265,9 @@ fn cursor_actions(
             placeholder.can_place = false;
             placeholder_visibility.is_visible = false;
             placeholder_transform.scale = Vec3::ONE;
+
+            indicator_visibility.is_visible = false;
+            indicator_transform.scale = Vec3::ONE;
         }
 
         if buttons.just_pressed(MouseButton::Right) {
@@ -254,6 +275,9 @@ fn cursor_actions(
             placeholder.can_place = false;
             placeholder_visibility.is_visible = false;
             placeholder_transform.scale = Vec3::ONE;
+
+            indicator_visibility.is_visible = false;
+            indicator_transform.scale = Vec3::ONE;
         }
     }
 }
@@ -272,6 +296,38 @@ fn keyboard_inputs(
     }
     if keys.just_pressed(KeyCode::S) {
         spawn_random(commands, meshes, materials);
+    }
+}
+
+fn camera_movement(
+    mut q_camera: Query<(&mut OrthographicProjection, &mut Transform), With<MainCamera>>,
+    mut motion_evr: EventReader<MouseMotion>,
+    keys: Res<Input<KeyCode>>,
+) {
+    if keys.pressed(KeyCode::LControl) {
+        let (camera, mut camera_transform) = q_camera.single_mut();
+        for ev in motion_evr.iter() {
+            camera_transform.translation.x -= ev.delta.x;
+            camera_transform.translation.y += ev.delta.y;
+        }
+    }
+}
+
+fn camera_zoom(
+    mut q_camera: Query<&mut OrthographicProjection, With<MainCamera>>,
+    mut scroll_evr: EventReader<MouseWheel>,
+) {
+    let mut projection = q_camera.single_mut();
+    use bevy::input::mouse::MouseScrollUnit;
+    for ev in scroll_evr.iter() {
+        match ev.unit {
+            MouseScrollUnit::Line => {
+                projection.scale += 0.1 * ev.y;
+            }
+            MouseScrollUnit::Pixel => {
+                projection.scale += 0.01 * ev.y;
+            }
+        }
     }
 }
 
@@ -317,5 +373,5 @@ fn random_color() -> Color {
     let g = rng.gen_range(0.0..=1.) as f32;
     let b = rng.gen_range(0.0..=1.) as f32;
 
-    return Color::rgb(r, g, b);
+    return Color::rgba(r, g, b, 1.);
 }
