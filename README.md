@@ -1,5 +1,5 @@
 # About this project
-This is a simple gravity simulator built with rust. The main equation used here is (Newton's law of gravitation)[https://en.wikipedia.org/wiki/Newton%27s_law_of_universal_gravitation]. 
+This is a simple gravity simulator built with rust. The main equation used here is [Newton's law of gravitation](https://en.wikipedia.org/wiki/Newton%27s_law_of_universal_gravitation). 
 
 Here are some examples:
 
